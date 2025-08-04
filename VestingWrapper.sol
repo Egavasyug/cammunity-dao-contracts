@@ -2,90 +2,91 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.0;
 
-interface ICAMC {
-    function transfer(address recipient, uint256 amount) external returns (bool);
+interface IVerification {
+    function isVerified(address user) external view returns (bool);
+}
+
+interface INFTRegistry {
+    function hasPostedNFT(address user) external view returns (bool);
+}
+
+interface ITokenRegistry {
+    function creatorTokenIssued(address user) external view returns (bool);
+    function getUniqueHolders(address creator) external view returns (uint256);
+}
+
+interface IDAO {
+    function hasVoted(address user) external view returns (bool);
 }
 
 contract VestingWrapper {
-    address public admin;
-    ICAMC public camcToken;
+    address public owner;
+    uint256 public constant VERIFICATION_FEE = 100 * 1e18; // e.g., 100 tokens
 
-    struct Vesting {
-        uint256 totalAllocation;
-        uint256 unlocked;
-        bool verified;
-        bool contentPublished;
-        bool hasSubscribers;
-        bool hasPromoted;
-    }
+    IVerification public verificationContract;
+    INFTRegistry public nftRegistry;
+    ITokenRegistry public tokenRegistry;
+    IDAO public daoContract;
 
-    mapping(address => Vesting) public vestings;
+    mapping(address => uint256) public airdropBalance;
+    mapping(address => bool) public hasClaimed;
+    mapping(address => bool) public partialUnlocked;
 
-    modifier onlyAdmin() {
-        require(msg.sender == admin, "Not admin");
+    event PartialUnlockForVerification(address indexed user, uint256 amount);
+    event AirdropUnlocked(address indexed user);
+
+    modifier onlyOwner() {
+        require(msg.sender == owner, "Not authorized");
         _;
     }
 
-    event TokensUnlocked(address indexed user, uint256 amount);
-
-    constructor(address _camcToken) {
-        admin = msg.sender;
-        camcToken = ICAMC(_camcToken);
+    constructor(
+        address _verification,
+        address _nftRegistry,
+        address _tokenRegistry,
+        address _daoContract
+    ) {
+        owner = msg.sender;
+        verificationContract = IVerification(_verification);
+        nftRegistry = INFTRegistry(_nftRegistry);
+        tokenRegistry = ITokenRegistry(_tokenRegistry);
+        daoContract = IDAO(_daoContract);
     }
 
-    function initializeVesting(address user, uint256 totalAmount) external onlyAdmin {
-        require(vestings[user].totalAllocation == 0, "Already initialized");
-        vestings[user] = Vesting({
-            totalAllocation: totalAmount,
-            unlocked: 0,
-            verified: false,
-            contentPublished: false,
-            hasSubscribers: false,
-            hasPromoted: false
-        });
+    function unlockForVerification() external {
+        require(!verificationContract.isVerified(msg.sender), "Already verified");
+        require(airdropBalance[msg.sender] >= VERIFICATION_FEE, "Insufficient balance");
+        require(!partialUnlocked[msg.sender], "Already unlocked partial");
+
+        airdropBalance[msg.sender] -= VERIFICATION_FEE;
+        partialUnlocked[msg.sender] = true;
+
+        // Forward logic for payment can be added here if needed
+
+        emit PartialUnlockForVerification(msg.sender, VERIFICATION_FEE);
     }
 
-    function unlockByVerification(address user) external onlyAdmin {
-        _unlockMilestone(user, 25, "verified");
+    function checkAllMilestones(address user) public view returns (bool) {
+        return (
+            verificationContract.isVerified(user) &&
+            nftRegistry.hasPostedNFT(user) &&
+            tokenRegistry.creatorTokenIssued(user) &&
+            tokenRegistry.getUniqueHolders(user) >= 5 &&
+            daoContract.hasVoted(user)
+        );
     }
 
-    function unlockByContent(address user) external onlyAdmin {
-        _unlockMilestone(user, 25, "contentPublished");
+    function claimAirdrop() external {
+        require(!hasClaimed[msg.sender], "Already claimed");
+        require(checkAllMilestones(msg.sender), "Milestones incomplete");
+
+        hasClaimed[msg.sender] = true;
+
+        emit AirdropUnlocked(msg.sender);
+        // Token transfer logic should follow here
     }
 
-    function unlockBySubscribers(address user) external onlyAdmin {
-        _unlockMilestone(user, 25, "hasSubscribers");
-    }
-
-    function unlockByPromotion(address user) external onlyAdmin {
-        _unlockMilestone(user, 25, "hasPromoted");
-    }
-
-    function _unlockMilestone(address user, uint8 percent, string memory flag) internal {
-        Vesting storage v = vestings[user];
-        require(v.totalAllocation > 0, "User not initialized");
-
-        if (keccak256(abi.encodePacked(flag)) == keccak256("verified")) {
-            require(!v.verified, "Already unlocked");
-            v.verified = true;
-        } else if (keccak256(abi.encodePacked(flag)) == keccak256("contentPublished")) {
-            require(!v.contentPublished, "Already unlocked");
-            v.contentPublished = true;
-        } else if (keccak256(abi.encodePacked(flag)) == keccak256("hasSubscribers")) {
-            require(!v.hasSubscribers, "Already unlocked");
-            v.hasSubscribers = true;
-        } else if (keccak256(abi.encodePacked(flag)) == keccak256("hasPromoted")) {
-            require(!v.hasPromoted, "Already unlocked");
-            v.hasPromoted = true;
-        }
-
-        uint256 amount = (v.totalAllocation * percent) / 100;
-        v.unlocked += amount;
-        require(camcToken.transfer(user, amount), "Transfer failed");
-        emit TokensUnlocked(user, amount);
-    }
-
-    function getUnlockedAmount(address user) external view returns (uint256) {
-        return vestings[user].unlocked;
+    function fundAirdrop(address user, uint256 amount) external onlyOwner {
+        airdropBalance[user] += amount;
     }
 }
